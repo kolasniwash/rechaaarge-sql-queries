@@ -1,0 +1,734 @@
+------------------------------------------------------------------------------------------------------------------------------
+
+-- QUERYS for TABLEAU 
+-- Last update 01/03/2019
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+-- 1. CLICKS DONATION - donations.csv
+------------------------------------------------------------------------------------------------------------------------------
+-- Donations table with data from users / applications / countries data left joined
+-- says take id from users_user and add it to the donation table.
+
+SELECT dd.*,
+        uu.*,
+        ac.name as donor_country,
+        aa.id,
+        aa.name
+FROM donations_donation dd
+LEFT JOIN users_user uu on uu.id = dd.user_id
+LEFT JOIN applications_app aa on dd.app_id = aa.id
+LEFT JOIN applications_country ac on uu.country_id = ac.id
+WHERE dd.created >= '2018/08/01';
+
+------------------------------------------------------------------------------------------------------------------------------
+-- 2. creator.csv query
+-- All creator fields data compiled per creator
+--returns date modified // creator id // campaign id // campaign created // creator name // slug // account created // country // twitch followers // you tube followers // date of first donation // total revenue earned to date
+------------------------------------------------------------------------------------------------------------------------------
+
+WITH creators as (
+        SELECT nn.modified As date_modified,--Modification date -- use this
+                CAST(uu.last_login as DATE) as last_login,
+                nn.id As creatorID,--Creator ID
+                ng.id AS campaign_id, -- Campaign ID -- really only use this
+                ng.created as campaign_created,  -- use this
+                nn.name As creatorName, --Creators name
+                nn.slug as SLUG, ----- pull creator slug name
+                nn.created As account_created,  --Creation Date
+                users_twitchuser.followers as TWfollowers,
+                users_youtubechannel.stat_sub_count as YTfollowers,
+                uu.first_name as first_name,
+                uu.last_name as last_name,
+                uu.email as email,
+                uu.country_id
+        FROM ngos_ngo nn, ngos_campaign ng, users_user uu, users_twitchuser--Tablas necesarias para consulta
+        right join users_creator on users_twitchuser.creator_id = users_creator.id
+        left join users_youtubechannel on users_creator.id = users_youtubechannel.creator_id
+        WHERE nn.id=ng.ngo_id and nn.user_id=uu.id and users_creator.user_id_id = uu.id and nn.modified >= '01/01/2018' and uu.user_type = 'maker' --Date filter
+),
+first_donation as (
+        SELECT 
+                dd.campaign_id as campaign_id,
+                CAST (min (dd.created) AS DATE) as date_first_donation
+        FROM donations_donation dd
+        Group by campaign_id
+), 
+creator_rev as (
+        SELECT
+                dd.campaign_id as campaign_id,
+                CAST(dd.modified as DATE) as day_active,
+                CASE WHEN (dd.validated = 'TRUE') 
+                        THEN sum(dd.payout) over (
+                        partition by dd.campaign_id
+                        order by dd.id rows unbounded preceding) END AS total_Rev,
+                CASE WHEN (CASE WHEN (dd.validated = 'TRUE') 
+                                THEN sum(dd.payout) over (
+                                partition by dd.campaign_id
+                                order by dd.modified, dd.id rows unbounded preceding) END) >= 30
+                        THEN CAST(dd.modified as DATE) ELSE null END as has_30_date
+        FROM donations_donation dd
+        WHERE dd.modified >= '01/01/2018'
+        Group by campaign_id, CAST(dd.modified as DATE), dd.validated, dd.payout, dd.id
+)
+SELECT 
+        cast(c.date_modified as DATE) as date_modified,
+        c.creatorID,
+        c.campaign_id,
+        c.last_login,
+        cast(c.campaign_created as DATE) as campaign_created,
+        c.creatorName,
+        c.SLUG,
+        c.first_name as first_name,
+        c.last_name as last_name,
+        c.email as email,
+        cast(c.account_created as DATE) as account_created,
+        c.country_id,
+        ac.name,
+        c.TWfollowers,
+        c.YTfollowers,
+        fd.date_first_donation,
+        max(cr.total_rev) as creator_total_rev,
+        min(cr.has_30_date) as date_has_30
+FROM creators c 
+left join first_donation fd USING (campaign_id)
+LEFT JOIN creator_rev cr USING (campaign_id)
+LEFT JOIN applications_country ac on c.country_id = ac.id
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16;
+
+------------------------------------------------------------------------------------------------------------------------------
+-- 3. DONOR INTERACTIONS QUERY -- donor-interaction.csv
+-- Filters the fingerprint and returns number of clicks/activity of unique donors by date
+------------------------------------------------------------------------------------------------------------------------------
+-- Used for
+-- Nº of donors registered (clicked)
+-- Nº of anonymous donations (validated/postback)
+-- Nº of named donations (validated/postback)
+-- Nº of >2 donations from same user  (registered or not)
+-- Nº donations with text (validated/postbacked donations)
+
+-- donor-interactions.csv --- day active // modified username // clicks // if ever has validated PB // if ever has message // if creator replied // user type // date joined
+-- results are by day activity
+
+SELECT  cast(dd.modified as date) as day_active,
+        left(uu.username, 32) as username_mod,
+        CASE WHEN (uu.user_type = 'anonymous') THEN count(left(uu.username, 32))
+             WHEN (uu.user_type = 'follower') THEN count(uu.username) 
+             WHEN (uu.user_type = 'maker') THEN count(uu.username) END as clicks,
+        CASE WHEN dd.validated = 'TRUE' THEN 'TRUE' ELSE 'FALSE' END as has_validated_y_n,
+             CASE WHEN dm.text is not null THEN 'TRUE' ELSE 'FALSE' END as messages_y_n,
+             CASE WHEN dm.response is not null then 'TRUE' ELSE 'FALSE' END as creator_replied,
+        uu.user_type as user_type,
+        cast(uu.date_joined as DATE) as date_joined
+FROM donations_donation dd 
+JOIN users_user uu on dd.user_id=uu.id
+LEFT JOIN donations_donationmessage dm ON dd.id = dm.donation_id_id
+where dd.created >= '2018/08/01'
+group by 1, 2, 4, 5, 6, uu.user_type, 8;
+
+------------------------------------------------------------------------------------------------------------------------------
+-- 4. active-creator-days.csv
+-- Same as #3 for creators. 
+-- returns activity per day per creator with a running total of earnings and a total revenue per day. 
+-- campaign id // clicks per day // post bk per day // validated per day // total revenue per day // date of activty
+------------------------------------------------------------------------------------------------------------------------------
+SELECT dd.campaign_id,
+       CASE WHEN (dd.validated ='TRUE' or dd.validated = 'FALSE')THEN count(dd.campaign_ID) END as clicks,
+       CASE WHEN (dd.postback_received = 'TRUE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS PostRev,
+       CASE WHEN (dd.validated = 'TRUE' AND dd.postback_received = 'FALSE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS ValRev,
+       CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS TotalRevenue,
+       CAST(dd.modified as DATE) as active_day,                                 -- running total per creator, per day, per donation id
+       CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') 
+                THEN sum(dd.payout) over (
+                partition by dd.campaign_id
+                order by dd.modified, dd.id rows unbounded preceding) END AS RunningTotalRev,
+       CASE WHEN (CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') 
+                THEN sum(dd.payout) over (
+                partition by dd.campaign_id
+                order by dd.modified, dd.id rows unbounded preceding) END) >= 30
+        THEN 'TRUE' ELSE ' FALSE' END as has_30
+FROM donations_donation dd
+WHERE dd.created >= '2018/01/01'
+GROUP BY dd.campaign_id, CAST(dd.modified as DATE), dd.id, dd.payout, dd.validated, dd.postback_received;
+
+
+------------------------------------------------------------------------------------------------------------------------------
+-- 5. retention-creator.csv
+-- Creator query for retnetion - showing daily activity with the following fields
+-- returns date active // campaign id // date of first donation // number of clicks // country id of the creator  // twitch and yt followers // creator's total revenue
+------------------------------------------------------------------------------------------------------------------------------
+
+with first_donation as (
+        SELECT 
+                dd.campaign_id as campaign_id,
+                CAST (min (dd.created) AS DATE) as date_first_donation
+        FROM donations_donation dd
+        Group by campaign_id
+),
+creator_activity as (
+        SELECT  
+                CAST(dd.modified as DATE) as day_active,
+                dd.campaign_id as campaign_id,
+                count(*) as clicks,
+                uu.country_id,
+                users_twitchuser.followers as TWfollowers,
+                users_youtubechannel.stat_sub_count as YTfollowers
+        FROM donations_donation dd, ngos_ngo nn, ngos_campaign ng, users_user uu, users_twitchuser
+        right join users_creator on users_twitchuser.creator_id = users_creator.id
+        left join users_youtubechannel on users_creator.id = users_youtubechannel.creator_id
+        WHERE nn.id=ng.ngo_id and nn.user_id=uu.id and dd.campaign_id = ng.id and users_creator.user_id_id = uu.id and dd.modified >= '01/01/2018' --and uu.user_type='maker'
+        Group by dd.campaign_id, CAST(dd.modified as DATE), uu.country_id, users_twitchuser.followers, users_youtubechannel.stat_sub_count
+        HAVING count(*) >= 1
+        ),
+creator_rev as (
+        SELECT
+                dd.campaign_id as campaign_id,
+                CAST(dd.modified as DATE) as day_active,
+                CASE WHEN (dd.validated = 'TRUE') 
+                        THEN sum(dd.payout) over (
+                        partition by dd.campaign_id
+                        order by dd.id rows unbounded preceding) END AS totalRev
+        FROM donations_donation dd
+        WHERE dd.modified >= '2018/08/01'
+        Group by campaign_id, CAST(dd.modified as DATE), dd.validated, dd.payout, dd.id
+)
+Select
+        ca.campaign_id,
+        fd.date_first_donation,
+        ca.day_active,
+        ca.clicks,
+        ca.country_id,
+        ca.TWfollowers,
+        ca.YTfollowers,
+       max(cr.totalRev) as creator_rev
+From creator_activity ca join first_donation fd using (campaign_id)
+Join creator_rev cr using (campaign_id)
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+-- 6. churn.csv
+-- year // month number // cmpaign id
+------------------------------------------------------------------------------------------------------------------------------
+
+SELECT
+        dd.campaign_id as campaign_id,
+        EXTRACT(YEAR FROM dd.modified) as active_year,
+        EXTRACT(MONTH from dd.modified) as active_month
+FROM donations_donation dd
+WHERE  CAST(dd.modified as DATE) >= '2018/07/01'
+group by dd.campaign_id, 2, 3;
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+-- CLICKS DONATION - donations.csv
+------------------------------------------------------------------------------------------------------------------------------
+-- Donations table with country
+-- says take id from users_user and add it to the donation table.
+Select *
+from donations_donation dd, users_user u, applications_app aa
+where u.id=dd.user_id and dd.app_id = aa.id and dd.created >= '2018/08/01';  --Year/Month/Day
+
+select *
+From donations_donation dd
+Where CAST(dd.modified as DATE) >= '2019/01/26';
+
+------------------------------------------------------------------------------------------------------------------------------
+-- ACTIVE CREATORS - active-creator-days.csv
+------------------------------------------------------------------------------------------------------------------------------
+/* active-creator-days.csv 
+creator activity table draft, headers: 
+campaign id / clicks per day / post bk per day / validated per day / total revenue per day / date of activty */
+
+SELECT dd.campaign_id,
+       CASE WHEN (dd.validated ='TRUE' or dd.validated = 'FALSE')THEN count(dd.campaign_ID) END as clicks,
+       CASE WHEN (dd.postback_received = 'TRUE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS PostRev,
+       CASE WHEN (dd.validated = 'TRUE' AND dd.postback_received = 'FALSE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS ValRev,
+       CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS TotalRevenue,
+       CAST(dd.modified as DATE) as active_day,                                 -- running total per creator, per day, per donation id
+       CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') 
+                THEN sum(dd.payout) over (
+                partition by dd.campaign_id
+                order by dd.modified, dd.id rows unbounded preceding) END AS RunningTotalRev,
+       CASE WHEN (CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') 
+                THEN sum(dd.payout) over (
+                partition by dd.campaign_id
+                order by dd.modified, dd.id rows unbounded preceding) END) >= 30
+        THEN 'TRUE' ELSE ' FALSE' END as has_30
+FROM donations_donation dd
+GROUP BY dd.campaign_id, CAST(dd.modified as DATE), dd.id, dd.payout, dd.validated, dd.postback_received;
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+---- Followers.csv --- not used in tableau
+------------------------------------------------------------------------------------------------------------------------------
+----Simple query that pulls follower user_id / date joined / useranmes / last date active
+SELECT uu.id as user_id,
+        cast(uu.date_joined as DATE) as date_joined, 
+        uu.username as username,
+        CAST(uu.last_seen as DATE) last_date_active,
+        uu.user_type as donor_type
+FROM users_user uu
+Where uu.user_type = 'follower'or uu.user_type = 'anonymous';
+
+------------------------------------------------------------------------------------------------------------------------------
+--MESSAGES QUERY -- messages.csv -- not used in tableau
+------------------------------------------------------------------------------------------------------------------------------
+
+SELECT 
+    dd.campaign_id,
+    CAST(dd.modified AS DATE) as dmod,
+    count (dd.payout) as messages_click,
+    CASE WHEN (dd.validated = 'TRUE') THEN count(dd.payout) END as messages_pb,
+    count(dm.response) as reply_count
+    
+FROM donations_donation dd, donations_donationmessage dm
+Where dd.id = dm.donation_id_id and dd.modified >= '2018/01/01'--Date filter
+GROUP BY dmod, dd.campaign_id, dd.validated;
+
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+-- OLD test queries
+------------------------------------------------------------------------------------------------------------------------------
+
+with test as (
+        SELECT
+                dd.campaign_id as campaign_id,
+                 CAST(dd.modified as DATE) as day_active,
+                CASE WHEN dd.validated = 'TRUE' THEN cast(sum(dd.payout)AS decimal (9,2)) END AS day_rev,
+                CASE WHEN (dd.validated = 'TRUE') 
+                THEN sum(dd.payout) over (
+                partition by dd.campaign_id
+                order by dd.id rows unbounded preceding) END AS totalRev
+        FROM donations_donation dd
+        Group by campaign_id, 2, dd.validated, dd.payout, dd.id
+)
+SELECT
+        t.campaign_id,
+        max(t.totalrev) as totalrev        
+FROM test t
+GROUP BY 1;
+
+
+
+SELECT
+        dd.campaign_id as campaign_id,
+        CAST(dd.modified as DATE) as day_active,
+        CASE WHEN (dd.validated = 'TRUE') THEN cast(sum(dd.payout)AS decimal (9,2)) END AS day_Rev
+FROM donations_donation dd
+WHERE dd.modified >= '01/01/2018'
+Group by campaign_id, CAST(dd.modified as DATE), dd.validated, dd.payout;
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+-- Creator retention query
+-- returns date active // campaign id // number of clicks // country id of the creator  // twitch and yt followers
+------------------------------------------------------------------------------------------------------------------------------
+
+-- WITH activity as (
+        SELECT  
+                CAST(dd.modified as DATE) as day_active,
+                dd.campaign_id as campaign_id,
+                count(*) as clicks,
+                uu.country_id,
+                users_twitchuser.followers as TWfollowers,
+                users_youtubechannel.stat_sub_count as YTfollowers
+        FROM donations_donation dd, ngos_ngo nn, ngos_campaign ng, users_user uu, users_twitchuser
+        right join users_creator on users_twitchuser.creator_id = users_creator.id
+        left join users_youtubechannel on users_creator.id = users_youtubechannel.creator_id
+        WHERE nn.id=ng.ngo_id and nn.user_id=uu.id and dd.campaign_id = ng.id and users_creator.user_id_id = uu.id and uu.user_type='maker' and dd.modified >= '01/01/2018'
+        GROUP BY CAST(dd.modified as DATE), dd.campaign_id, uu.country_id, users_twitchuser.followers, users_youtubechannel.stat_sub_count
+        HAVING count(*) >= 1;
+        
+SELECT * FROM applications_country;
+
+
+/* SELECT aa.day_active,
+        count(distinct aa.campaign_id) as creators_started,
+        count(distinct ab.campaign_id) as retained_b,
+        count(distinct ac.campaign_id) as retained_c,
+        count(distinct ad.campaign_id) as retained_d,
+        count(distinct ae.campaign_id) as retained_e,
+        count(distinct af.campaign_id) as retained_f
+FROM activity aa
+LEFT JOIN activity as ab ON aa.campaign_id = ab.campaign_id AND aa.day_active = ab.day_active - interval '1 day'
+LEFT JOIN activity as ac ON aa.campaign_id = ac.campaign_id AND aa.day_active = ac.day_active - interval '2 day'
+LEFT JOIN activity as ad ON aa.campaign_id = ad.campaign_id AND aa.day_active = ad.day_active - interval '3 day'
+LEFT JOIN activity as ae ON aa.campaign_id = ae.campaign_id AND aa.day_active = ae.day_active - interval '4 day'
+LEFT JOIN activity as af ON aa.campaign_id = af.campaign_id AND aa.day_active = af.day_active - interval '5 day'
+GROUP BY aa.day_active;
+
+*/
+
+------------------------------------------------------------------------------------------------------------------------------
+----retention re structure = use this format for last periods
+----Self join method to generate 1 days retention -- must be rewritten for our db
+
+SELECT date(g1.created_at) as dt,
+				count(distinct g1.user_id) as total_users,
+        count(distinct g2.user_id) as retained_users
+FROM gameplays as g1
+LEFT JOIN gameplays as g2 ON g1.user_id = g2.user_id
+AND date(g1.created_at) = date(datetime(g2.created_at, '-1 day'))
+group by 1
+order by 1
+Limit 100;
+
+
+--OLD Creators and first donation query
+-- creators.csv
+------------------------------------------------------------------------------------------------------------------------------
+
+--date modifies // creatorid // campaign id //  date of campaign created // creators name // slug //  twitch and youtube followers
+
+SELECT nn.modified As date_modified,--Modification date -- use this
+       nn.id As creatorID,--Creator ID
+       ng.id AS CAMPAIGNID, -- Campaign ID -- really only use this
+       ng.created as campaign_created,  -- use this
+       nn.name As creatorName, --Creators name
+       nn.slug as SLUG, ----- pull creator slug name
+       nn.created As account_created,  --Creation Date
+       users_twitchuser.followers as TWfollowers,
+       users_youtubechannel.stat_sub_count as YTfollowers
+FROM ngos_ngo nn, ngos_campaign ng, users_user uu, users_twitchuser--Tablas necesarias para consulta
+right join users_creator on users_twitchuser.creator_id = users_creator.id
+left join users_youtubechannel on users_creator.id = users_youtubechannel.creator_id
+WHERE nn.id=ng.ngo_id and nn.user_id=uu.id and users_creator.user_id_id = uu.id and nn.modified >= '01/01/2018' and uu.user_type = 'maker';--Date filter
+
+------------------------------------------------------------------------------------------------------------------------------
+---- OLD date-first-donation-w30.csv
+------------------------------------------------------------------------------------------------------------------------------
+----Simple query that pulls follower user_id / date joined / useranmes / last date active
+--- FIRST DONATION and Creators reaching $30 query
+SELECT dd.campaign_id,
+        CAST (min (dd.created) AS DATE) as donation_min_date,
+        CASE WHEN (CASE WHEN (dd.validated = 'TRUE') 
+                THEN sum(dd.payout) over (
+                partition by dd.campaign_id
+                order by dd.id rows unbounded preceding) END) >= 30
+        THEN 'TRUE' ELSE ' FALSE' END as has_30
+FROM donations_donation dd
+Where dd.validated = 'TRUE' and dd.modified >= '2018/01/01' 
+GROUP BY dd.campaign_id, CAST (dd.modified AS DATE), dd.id, dd.validated, dd.payout;
+
+
+
+
+SELECT
+                dd.campaign_id as campaign_id,
+                CAST(dd.modified as DATE) as day_active,
+                CASE WHEN (dd.validated = 'TRUE') 
+                        THEN sum(dd.payout) over (
+                        partition by dd.campaign_id
+                        order by dd.id rows unbounded preceding) END AS total_Rev,
+                CASE WHEN (CASE WHEN (dd.validated = 'TRUE' or dd.postback_received = 'TRUE') 
+                                THEN sum(dd.payout) over (
+                                partition by dd.campaign_id
+                                order by dd.modified, dd.id rows unbounded preceding) END) >= 30
+                        THEN CAST(dd.modified as DATE) ELSE null END as has_30_date
+        FROM donations_donation dd
+        WHERE dd.modified >= '01/01/2018'
+        Group by campaign_id, CAST(dd.modified as DATE), dd.validated, dd.payout, dd.id;
+
+select *
+from users_user
+where user_type = 'follower'
+limit 100;
+
+Select 
+--        dd.network,
+        count(dd.ip) as click
+--        CASE WHEN (dd.postback_received = TRUE) THEN count(*) END as postback
+from donations_donation dd, users_user u, applications_app aa
+where u.id=dd.user_id and dd.app_id = aa.id and dd.modified >= '2019/01/01' and dd.network <> 'survey';
+-- group by dd.network, dd.postback_received;  --Year/Month/Day
+
+
+------------------------------------------------------------------------------------------------------------------------------
+--OLD OLD Multiuple Donors Query -- donor-multiples.csv
+------------------------------------------------------------------------------------------------------------------------------
+-- donor-donation-count.csv -- count // user_id // country_id // month
+-- this query counts multiple donations from users
+select count(*), 
+        user_id, 
+        u.country_id, 
+        to_char(d.modified, 'Month') AS MONTH, 
+        CAST(u.last_seen as DATE) last_date_active --Muestra el mes
+from donations_donation d, users_user u
+where d.user_id = u.id and d.validated = 'TRUE' AND d.postback_received = 'TRUE' AND created >= '01/01/2018'
+group by user_id, u.country_id, month, u.last_seen;
+
+------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------
+-- workspace
+
+SELECT  cast(dd.modified as date) as day_active,
+        left(uu.username, 32) as username_mod,
+        CASE WHEN (uu.user_type = 'anonymous') THEN count(left(uu.username, 32))
+             WHEN (uu.user_type = 'follower') THEN count(uu.username) 
+             WHEN (uu.user_type = 'maker') THEN count(uu.username) END as clicks,
+        CASE WHEN dd.validated = 'TRUE' THEN 'TRUE' ELSE 'FALSE' END as has_validated_y_n,
+             CASE WHEN dm.text is not null THEN 'TRUE' ELSE 'FALSE' END as messages_y_n,
+             CASE WHEN dm.response is not null then 'TRUE' ELSE 'FALSE' END as creator_replied,
+        uu.user_type as user_type,
+        cast(uu.date_joined as DATE) as date_joined
+FROM donations_donation dd 
+JOIN users_user uu on dd.user_id=uu.id
+LEFT JOIN donations_donationmessage dm ON dd.id = dm.donation_id_id
+where dd.created >= '2018/08/01'
+group by 1, 2, 4, 5, 6, uu.user_type, 8;
+
+-- identify creator-ids active in the last month
+SELECT
+        EXTRACT(MONTH from dd.modified) as active_month,
+        COUNT(DISTINCT dd.campaign_id) as first_active,
+        EXTRACT(MONTH from dd2.modified) as retained_month,
+        COUNT(DISTINCT dd2.campaign_id) as retained
+FROM donations_donation dd
+LEFT JOIN donations_donation as dd2 on dd.campaign_id = dd2.campaign_id -- and EXTRACT(MONTH from dd.modified) = (EXTRACT(MONTH from dd2.modified) - 1)
+WHERE  CAST(dd.modified as DATE) >= '2018/11/01' and CAST(dd.modified as DATE) <= '2018/12/31'
+group by 1,3;
+
+
+--CREATOR ACTIVITY - creators.csv
+SELECT nn.modified As date_modification,--Modification date
+       nn.id As creatorID,--Creator ID
+       ng.id AS CAMPAIGNID, -- Campaign ID
+       nn.name As creatorName ,--Creators name
+       nn.created As date_creation,--Creation Date
+       CASE
+           WHEN uu.last_login IS NOT NULL THEN 'logged in'
+           ELSE 'Not logged in'
+       END As Login,--Lgin
+       ng.active As activeCampaign --- es activa
+FROM ngos_ngo nn,
+     ngos_campaign ng, users_user uu --Tablas necesarias para consulta
+WHERE nn.id=ng.ngo_id and nn.user_id=uu.id
+and nn.modified >= '2017/09/01';--Date filter
+
+
+----- new modified creator table with first date of donation
+SELECT nn.modified As date_modification,--Modification date
+       nn.id As creatorID,--Creator ID
+       ng.id AS CAMPAIGNID, -- Campaign ID
+       nn.name As creatorName ,--Creators name
+       nn.created As date_creation,--Creation Date
+       CASE
+           WHEN uu.last_login IS NOT NULL THEN 'logged in'
+           ELSE 'Not logged in'
+       END As Login,--Lgin
+       ng.active As activeCampaign, --- es activa
+       CAST(min (dd.created) AS DATE) as donation_min
+FROM ngos_ngo nn,
+     ngos_campaign ng, users_user uu, donations_donation dd --Tablas necesarias para consulta
+WHERE nn.id=ng.ngo_id and nn.user_id=uu.id
+and nn.modified >= '2017/09/01' and dd.validated = 'True';--Date filter
+
+
+SELECT dd.campaign_id,
+        CAST(min (dd.created) AS DATE) as donation_min
+FROM donations_donation dd
+Where dd.validated = 'TRUE' and dd.modified >= '2017/01/01' 
+GROUP BY dd.campaign_id;
+
+
+--userID join & activity - useractivity.csv
+select id as user_id, username, first_name, last_name, date_joined, email, country
+from users_user
+where user_type = 'maker';
+
+----followers
+select ngos_ngo.user_id as user_id, ngos_campaign.created as campaign_created
+from ngos_ngo, users_user, ngos_campaign
+where users_user.id = ngos_ngo.user_id --and ngos_ngo.id=ngos_campaign.ngo_id
+and users_user.user_type='follower';
+
+----Followers.csv
+----Simple query that pulls follower user_id / date joined / useranmes / last date active
+SELECT uu.id as user_id,
+        cast(uu.date_joined as DATE) as date_joined, 
+        uu.username as username,
+        CAST(uu.last_seen as DATE) last_date_active,
+        uu.user_type as donor_type
+FROM users_user uu
+Where uu.user_type = 'follower' or uu.user_type = 'anonymous';
+
+--app CPI - appcpi.csv
+Select *
+from applications_appcpi
+where country_id = '226' and country_id = '225';  --Year/Month/Day
+
+--appCountry - appCountry.csv
+Select *
+from applications_country
+
+--makers.csv
+Select *
+from users_creators
+
+----- donations2.csv ------
+Select created, 
+   CASE
+           WHEN (validated=true AND postback_received=false) THEN 'Validated'  
+           WHEN (validated=true AND postback_received=true) THEN 'Postback'
+           ELSE 'Click'
+       END As event_name,
+app_ID, campaign_ID, user_ID, network, cast(payout/0.9 as numeric(36,2)), applications_app.name
+from donations_donation, applications_app 
+where donations_donation.app_id = applications_app .id and  created >= '2018/01/01';
+
+
+---creatorsizes.csv-----
+select
+  nc.id as CAMPAIGNID,
+  nn.id as creatorID,
+  nn.name as creatorName,
+  nn.modified as date_modification,
+  nn.created as date_creation,
+  slug,
+  users_twitchuser.followers as TWfollowers,
+  users_youtubechannel.stat_sub_count as YTfollowers
+from ngos_campaign nc, ngos_ngo nn, users_user, users_twitchuser
+right join users_creator on users_twitchuser.creator_id = users_creator.id
+left join users_youtubechannel on users_creator.id = users_youtubechannel.creator_id
+where 
+  users_creator.user_id_id = users_user.id and
+  users_user.user_type='maker' and
+  users_user.id = nn.user_id and
+  nn.id = nc.ngo_id;
+
+------AudienceEnteredPerDay.csv------
+Select CAST(uc.date_joined AS DATE) as djoin, count (uc.date_joined) as Num_Creators, sum (stat_sub_count) as YT_Subs,sum (followers) as TW_Followers
+from users_creator uc, users_twitchuser ut, users_youtubechannel uy
+where uc.id = ut.creator_id and uc.id = uy.creator_id
+group by djoin
+order by djoin desc;
+
+-----RevenueByDay.csv-----
+SELECT
+    d.campaign_id,
+    CAST(d.modified AS DATE) as dmod,
+    CASE WHEN (d.validated = 'TRUE' or d.postback_received = 'TRUE') THEN cast(sum(d.payout)AS decimal (9,2)) END AS TotalRevenue,
+    CASE WHEN (d.postback_received = 'TRUE') THEN cast(sum(d.payout)AS decimal (9,2)) END AS PostRev,
+    CASE WHEN (d.validated = 'TRUE' AND d.postback_received = 'FALSE') THEN cast(sum(d.payout)AS decimal (9,2)) END AS ValRev
+    
+FROM donations_donation d
+GROUP BY dmod, d.campaign_id, d.validated, d.postback_received;
+
+
+------ClicksByDay.csv------
+select CAST(d.modified AS DATE) as dmod,count (user_id) as clicks,campaign_id
+from donations_donation d
+where d.modified >= '2018/01/01'
+group by dmod, d.campaign_id;
+
+Select *
+from donations_donation
+limit 100;
+
+------slug only.csv---------------
+Select nn.slug as SLUG -- take column slug
+From ngos_ngo nn --- from the table Ngo ngo
+
+-----creator id----
+SELECT nn.id as CAMPAIGN_ID
+FROM ngos_campaign nn
+
+
+-----slugCampaignID.csv-----
+SELECT nc.id as CAMPAIGN_ID, nn.slug as SLUG
+FROM ngos_campaign nc, ngos_ngo nn
+WHERE nc.ngo_id = nn.id
+------------------------------------------------------------------------------------------------------------------------------
+----- NEW Creator Data w/ Slug ----- 
+SELECT nn.modified As date_modified,--Modification date
+       nn.id As creatorID,--Creator ID
+       ng.id AS CAMPAIGNID, -- Campaign ID
+       ng.created as campaign_created, -- date campaign created
+       nn.name As creatorName, --Creators name
+       nn.slug as SLUG, ----- pull creator slug name
+       nn.created As account_created,--Creation Date
+       CAST(min (dd.created) AS DATE) as donation_min
+FROM ngos_ngo nn, users_user uu, ngos_campaign ng--Tablas necesarias para consulta
+LEFT JOIN donations_donation dd ON dd.campiagn_id = ngos_campaign.id
+WHERE nn.id=ng.ngo_id 
+and nn.user_id=uu.id 
+and nn.modified >= '2017/09/01' 
+and (dd.validated = 'True' OR dd.validated = 'FALSE');--Date filter
+
+
+SELECT  dd.campaign_id as campaignID,
+        nn.slug as SLUG,
+        nn.id,
+        CAST(min (dd.created) AS DATE) as donation_min
+FROM ngos_ngo nn, ngos_campaign nc, donations_donation dd
+Where dd.modified >= '2017/09/01' 
+        and dd.campaign_id = nc.id
+        and nc.id = nn.id
+        and (dd.validated = 'TRUE' or dd.validated = 'FALSE') 
+GROUP BY dd.campaign_id, nn.slug, nn.id;
+
+
+
+------------------------------------------------------------------------------------------------------------------------------
+---- creatorIDs and campaignIDs -- including campaignIDs with NULL value
+Select nn.created as account_created,
+        nn.id as creatorID,
+        nc.id as Campaign_id,
+        nc.created as campaign_created
+FROM ngos_ngo nn, ngos_campaign nc, users_user
+left join ngos_campaign on ngos_ngo.id = ngos_campaign.ngo_id;
+
+----- creator-onboarding.csv
+Select nn.created as account_created,
+        nn.id as creatorID,
+        ng.id as Campaign_id,
+        ng.created as campaign_created
+FROM ngos_ngo nn
+left join ngos_campaign ng on nn.id = ng.ngo_id
+order by nn.id;
+
+--- date first donation
+SELECT dd.campaign_id,
+        nn.id as creatorID,
+        CAST(min (dd.created) AS DATE) as donation_min
+FROM donations_donation dd
+JOIN ngos_ngo nn ON dd.campaign_id = nn.id
+Where dd.validated = 'TRUE' and dd.modified >= '2017/01/01' 
+GROUP BY dd.campaign_id,nn.id;
+
+
+------- donations with messages and posts backs
+SELECT 
+    dd.campaign_id,
+    CAST(dd.modified AS DATE) as dmod,
+    count (dd.payout)
+    
+FROM donations_donation dd, donations_donationmessage dm
+Where dd.id = dm.donation_id_id and dd.validated = 'TRUE' and dd.modified >= '2018/01/01'--Date filter
+GROUP BY dmod, dd.campaign_id;
+
+----------find first date of donation
+SELECT dd.campaign_id,
+        CAST (min (dd.created) AS DATE) as date_donation_min
+FROM donations_donation dd
+Where dd.validated = 'TRUE' and dd.modified >= '2017/01/01' 
+GROUP BY dd.campaign_id;
+
+------ counts number of days where each creator has earned > 20 validated donations
+------ and passes creators ID and date that 20 occurred
+SELECT dd.campaign_id, 
+       CAST(dd.modified AS DATE) as days_over_20,
+       count (dd.campaign_id) as donations            
+FROM donations_donation dd
+WHERE dd.validated = 'True' and dd.modified >= '2018/01/01'
+GROUP BY dd.campaign_id, days_over_20
+HAVING count(dd.modified) >=1
+order by campaign_id, days_over_20;
+
